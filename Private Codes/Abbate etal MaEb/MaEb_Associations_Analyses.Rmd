@@ -1,0 +1,253 @@
+---
+title: "Malaria Ebola Association Gabon Analyses"
+author: "JL Abbate"
+date: "10/21/2017"
+output: html_document
+---
+
+*Be sure to first decide whether you want to run the simulations for bootstrapping the 95% Confidence Intervals for the main model! It takes a very long time to run ~20 minutes for 200 simulations. I have set a default of 5 simulations, which allows the code to run but gives obvious warnings. Otherwise, use the option "SAVED" if you have the Table1data.csv file handy.
+```{r}
+run_simulations<-"SAVED"    # 3 options: "NO", "YES", or "SAVED"
+if(run_simulations=="SAVED"){nsims<-5}
+if(run_simulations=="NO"){nsims<-5}
+if(run_simulations=="YES"){nsims<-200}
+```
+
+Required packages:
+```{r, message=FALSE, warning=FALSE,results="hide"}
+library(boot)
+library(plotrix)
+library(car)
+library(lme4)
+library(ggplot2)
+```
+
+Load data files: (and work directory)
+```{r}
+setwd("~/Dropbox/Work_Labs/Roche/Gabon Dataset/")
+Xdat <- read.csv("gabondata_master.csv", sep=",")
+DeptPrevs <- read.csv("Gabon prevalence by dept.csv", sep=",")
+VillPrevs <- read.csv("Gabon prevalence by vill.csv", sep=",")
+setwd("~/Dropbox/Work_Labs/Roche/Gabon Dataset/Analyses/MaEb/")
+```
+
+## Correlation between EbolaAbs & Malaria Geographic Distribution
+* NB: malpa = presence/absence of any of the 3 species of Plasmodium, and includes samples which were positive for Plasmodium PCR but where species was not able to be determined.
+```{r}
+par(mfrow=c(1,2))
+hist(asin(sqrt(DeptPrevs$malpa.prev)),main="Dept Prevs MalariaPA")
+hist(asin(sqrt(DeptPrevs$ebola.prev)),main="Dept Prevs EbolaAbs")
+
+cor.test(DeptPrevs$malpa.prev,DeptPrevs$ebola.prev, method="spearman",exact=FALSE)
+
+par(mfrow=c(1,1))
+#pdf("MaEb_geog_corrASSQRT_grayCI.pdf")
+
+df<-DeptPrevs
+df$x<-asin(sqrt(df$ebola.prev))
+df$y<-asin(sqrt(df$malpa.prev))
+mod <- lm(y ~ x, data = df)
+newx <- seq(min(df$x), max(df$x), length.out=44)
+preds <- predict(mod, newdata = data.frame(x=newx), interval = 'confidence')
+df$y<-sin(df$y)^2
+df$x<-sin(df$x)^2
+newx<-sin(newx)^2
+preds<-sin(preds)^2
+plot(y ~ x, data = df,pch=16, xlab="Dept Prevalence EbolaAbs", ylab="Dept Prevalence MalariaPA")
+color <- "gray" #also pretty if this is "mediumpurple1"
+color_transparent <- adjustcolor(color, alpha.f = 0.3) 
+polygon(c(rev(newx), newx), c(rev(preds[ ,3]), preds[ ,2]), col=color_transparent, border = NA)
+#lines(newx, preds[ ,3], lty = 'dashed', col = 'red')
+#lines(newx, preds[ ,2], lty = 'dashed', col = 'red')
+lines(newx,preds[,1])
+
+#dev.off()
+
+```
+
+## Contribution of EbolaAbs to MalariaPA
+
+Clean dataset
+```{r}
+# classify age structure
+par(mfrow=c(1,2))
+hist(Xdat[which(Xdat$ebola_IgG==1),]$age, main="age structure EbolaAbs")
+hist(Xdat[which(Xdat$paMalaria==1),]$age, main="age structure MalariaPA")
+
+Xdat$ageclass<-NA
+Xdat$ageclass[which(Xdat$age<30)]<-"0 to 29"
+Xdat$ageclass[which(Xdat$age>29 & Xdat$age<45)]<-"30 to 45"
+Xdat$ageclass[which(Xdat$age>44 & Xdat$age<60)]<-"45 to 60"
+Xdat$ageclass[which(Xdat$age>59)]<-"60 and over"
+
+# subset data and recode variables to (simplified) factors
+maeb<-subset(Xdat,Xdat$paMalaria!="NA")
+maeb<-subset(maeb,maeb$ebola_IgG!="NA")
+maeb<-subset(maeb,maeb$sex!="NA")
+maeb<-subset(maeb,maeb$age!="NA")
+maeb<-subset(maeb,maeb$occupation!="NA")
+maeb<-subset(maeb,maeb$occupation!="INCONNUE")
+maeb$occup<-NA
+maeb$occup[which(maeb$occupation=="CHASSEUR")]<-"YEShunter"
+maeb$occup[which(maeb$occupation!="CHASSEUR")]<-"NOThunter"
+maeb<-subset(maeb,maeb$ecosys2!="NA")
+maeb$ecosys<-NA
+maeb$ecosys[which(maeb$ecosys2=="FORET")]<-"YESforest"
+maeb$ecosys[which(maeb$ecosys2!="FORET")]<-"NOTforest"
+
+maeb$vilfac<-as.factor(as.character(maeb$VillageGPScode))
+maeb$fac_eb<-as.factor(as.character(maeb$ebola_IgG))
+maeb$fac_occup<-as.factor(as.character(maeb$occup))
+maeb$fac_ageclass<-as.factor(as.character(maeb$ageclass))
+maeb$fac_ecosys<-as.factor(as.character(maeb$ecosys))
+maeb$fac_sex<-as.factor(as.character(maeb$sex))
+```
+
+Run GLMM with village as  a random factor
+```{r}
+mod<-glmer(maeb$paMalaria~maeb$fac_eb+maeb$fac_occup+maeb$fac_ageclass+maeb$fac_sex+maeb$fac_ecosys+maeb$Pop_Density_Dept+(1|maeb$vilfac),family="binomial",control = glmerControl(optimizer = "bobyqa"))
+summary(mod)
+drop1(mod,test="Chisq")
+```
+
+Bootstrapping for 95% Confidence Intervals
+```{r, message=FALSE, warning=FALSE, results="hide"}
+mySumm2 <- function(.) {
+           c(beta=fixef(.),sigma=sigma(.), sig01=sqrt(unlist(VarCorr(.))))}
+
+set.seed(101)
+system.time( boo01 <- bootMer(mod, mySumm2, nsim = nsims) )
+
+boo01
+boo01$t0<-boo01$t0[1:9]
+boo01$t<-boo01$t[,1:9]
+head(as.data.frame(boo01))
+
+## ------ Bootstrap-based confidence intervals ------------
+## warnings about "Some ... intervals may be unstable" go away
+##   for larger bootstrap samples, e.g. nsim=500
+
+## intercept
+(bCI.1 <- boot.ci(boo01, index=1, type=c("norm", "basic", "perc")))# beta
+
+## Copy of unexported stats:::format.perc helper function
+format.perc <- function(probs, digits) {
+               paste(format(100 * probs, trim = TRUE,
+               scientific = FALSE, digits = digits),"%")}
+
+## Extract all CIs
+bCI.tab <- function(b,ind=length(b$t0), type="perc", conf=0.95) {
+  btab0 <- t(sapply(as.list(seq(ind)),
+                    function(i)
+                      boot.ci(b,index=i,conf=conf, type=type)$percent))
+  btab <- btab0[,4:5]
+  rownames(btab) <- names(b$t0)
+  a <- (1 - conf)/2
+  a <- c(a, 1 - a)
+  pct <- format.perc(a, 3)
+  colnames(btab) <- pct
+  return(btab)
+}
+bCI.tab(boo01)
+
+#  #Graphical examination:
+#  plot(boo01,index=3)
+```
+Odds Ratios and 95% confidence intervals:
+```{r}
+Table1<-summary(boo01)
+Table1<-cbind(Table1,bCI.tab(boo01))
+Table1<-cbind(Table1,exp(Table1[,2]))
+Table1<-cbind(Table1,exp(Table1[,6]))
+Table1<-cbind(Table1,exp(Table1[,7]))
+#Table1<-cbind(Table1,rownames(Table1))
+Table1<-cbind(Table1,c("Intercept","EbolaIgG:Positive","Occupation:Hunter","Age:30-45","Age:45-60","Age:Over60","Sex:Male","Ecosystem:Forest","Dept Population Density"))
+colnames(Table1)[8:11]<-c("OR","LCL","UCL","group")
+Table1[,c("OR","LCL","UCL")]
+
+if(run_simulations=="YES"){write.csv(Table1,"Table1dataX.csv")} # to store
+```
+
+Forest Plot for Figure 2:
+```{r}
+if(run_simulations=="SAVED"){Table1<-read.table("Table1data.csv",as.is=T, header=T, sep=",")}
+
+library(ggplot2)
+theme_set(theme_bw())
+theme_update(
+    axis.line = element_line(colour = "black"),
+    panel.grid.major = element_blank(),
+    panel.grid.minor = element_blank(),
+    panel.border = element_blank(),
+    panel.background = element_blank(),
+    axis.text=element_text(size=14,face="bold"),
+    axis.title=element_text(size=14,face="bold"),
+    plot.margin = unit(c(0,0,0,0), "lines")
+)
+
+credplot.gg <- function(d){
+ p <- ggplot(d, aes(x=x, y=y, ymin=ylo, ymax=yhi))+
+ geom_pointrange()+
+ geom_hline(yintercept = 1, linetype=2)+
+ coord_flip()+
+ xlab(NULL)+
+ ylab('Adjusted odds ratio')
+ return(p)
+}
+
+d<-data.frame(x=Table1[2:9,"group"],y=Table1[2:9,"OR"],ylo=Table1[2:9,"LCL"],yhi=Table1[2:9,"UCL"])
+d$x = factor(d$x, levels=rev(c("Intercept","EbolaIgG:Positive","Occupation:Hunter","Age:30-45","Age:45-60","Age:Over60","Sex:Male","Ecosystem:Forest","Dept Population Density")))
+credplot.gg(d)
+
+```
+
+Alternatively, we could report the effect sizes directly, as those are easier to interpret relative to one-another in a figure:
+```{r}
+if(run_simulations=="SAVED"){Table1<-read.table("Table1data.csv",as.is=T, header=T, sep=",")}
+
+library(ggplot2)
+theme_set(theme_bw())
+theme_update(
+    axis.line = element_line(colour = "black"),
+    panel.grid.major = element_blank(),
+    panel.grid.minor = element_blank(),
+    panel.border = element_blank(),
+    panel.background = element_blank(),
+    axis.text=element_text(size=14,face="bold"),
+    axis.title=element_text(size=14,face="bold"),
+    plot.margin = unit(c(0,0,0,0), "lines")
+)
+
+credplot.gg2 <- function(d2){
+ p2 <- ggplot(d2, aes(x=x2, y=y2, ymin=ylo2, ymax=yhi2))+
+ geom_pointrange()+
+ geom_hline(yintercept = 0, linetype=2)+
+ coord_flip()+
+ xlab(NULL)+
+ ylab('Bootstrapped median effect size')
+ return(p2)
+}
+
+d2<-data.frame(x2=Table1[2:9,"group"],y2=Table1[2:9,"bootMed"],ylo2=Table1[2:9,7],yhi2=Table1[2:9,8])
+d2$x2 = factor(d2$x, levels=rev(c("Intercept","EbolaIgG:Positive","Occupation:Hunter","Age:30-45","Age:45-60","Age:Over60","Sex:Male","Ecosystem:Forest","Dept Population Density")))
+credplot.gg2(d2)
+
+```
+
+For the two Plasmodium species with adequate numbers (P. falciparum and P. malariae), the results are qualitatively identical. 
+```{r}
+maebSPP<-subset(maeb,maeb$Pfalci!="NA")
+modPf<-glmer(maebSPP$Pfalci~maebSPP$fac_eb+maebSPP$fac_occup+maebSPP$fac_age+maebSPP$fac_sex+maebSPP$fac_ecosys+maebSPP$Pop_Density_Dept+(1|maebSPP$vilfac),family="binomial",control = glmerControl(optimizer = "bobyqa"))
+summary(modPf)
+drop1(modPf,test="Chisq")
+
+maebSPP<-subset(maeb,maeb$Pmalariae!="NA")
+modPm<-glmer(maebSPP$Pmalariae~maebSPP$fac_eb+maebSPP$fac_occup+maebSPP$fac_ageclass+maebSPP$fac_sex+maebSPP$fac_ecosys+maebSPP$Pop_Density_Dept+(1|maebSPP$vilfac),family="binomial",control = glmerControl(optimizer = "bobyqa"))
+summary(modPm)
+drop1(modPm,test="Chisq")
+
+maebSPP<-subset(maeb,maeb$Povale!="NA")
+modPo<-glmer(maebSPP$Povale~maebSPP$fac_eb+maebSPP$fac_occup+maebSPP$fac_age+maebSPP$fac_sex+maebSPP$fac_ecosys+maebSPP$Pop_Density_Dept+(1|maebSPP$vilfac),family="binomial",control = glmerControl(optimizer = "bobyqa"))
+summary(modPo)
+drop1(modPo,test="Chisq")
+```
